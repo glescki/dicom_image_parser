@@ -21,9 +21,7 @@ from multiprocessing import Pool
 from scipy.io import loadmat
 from medpy.io import load
 import SimpleITK as sitk
-
-
-TILE = 5
+from PIL import Image
 
 
 def load_dcm(path):
@@ -93,6 +91,14 @@ def resample(image, spacing, new_spacing=[1, 1, 1], binary=False):
 
     return image, new_spacing
 
+def window_image(image, window_center, window_width):
+    img_min = window_center - window_width // 2
+    img_max = window_center + window_width // 2
+    window_image = image
+    window_image[window_image < img_min] = img_min
+    window_image[window_image > img_max] = img_max
+
+    return window_image
 
 def sample_pair(image, label, c):
     fig, ax = plt.subplots(1, 2)
@@ -105,10 +111,6 @@ def sample_pair(image, label, c):
     #  plt.show()
     plt.savefig('out'+str(c)+'.png')
     plt.close('all')
-
-
-import matplotlib
-matplotlib.use('Agg')
 
 def unpack_hc(patient_path):
     label_parts = list(patient_path.parts)
@@ -180,28 +182,25 @@ def multi_processing_create_image(inputs):
     spacing_path = os.path.join(out_pat, 'spacing.npy')
     np.save(spacing_path, metadata)
 
-    slab = TILE // 2
     meta_lst = []
-    for c in range(slab, c_image.shape[2]-slab):
+    for c in range(c_image.shape[2]):
         s_id = str(c+1)
         slice_filename = s_id
-        s_image = c_image[..., c]
+        s_image = window_image(c_image[..., c], window_center, window_width)
+
+        norm_image = cv2.normalize(s_image, None, alpha = 0, beta = 255, norm_type = cv2.NORM_MINMAX, dtype = cv2.CV_32F)
+        norm_image = norm_image.astype(np.uint8)
         s_label = c_label[..., c]
-        if slab == 0:
-            t_image = s_image
-            t_label = s_label
-        else:
-            t_image = c_image[..., c-slab:c+slab+1]
-            t_label = c_label[..., c-slab:c+slab+1]
-        out = np.concatenate((t_image[None], t_label[None]))
+        s_label = s_label.astype(np.uint8)
 
-        out_path = os.path.join(out_pat, '{}.jpg'.format(slice_filename))
+        out_image_path = os.path.join(out_pat, '{}.jpeg'.format(slice_filename))
+        im = Image.fromarray(norm_image)
+        im.save(out_image_path)
 
-        im = Image.fromarray(out)
-        im.save(out_path)
+        out_mask_path = os.path.join(out_pat, '{}_mask.jpeg'.format(slice_filename))
+        mask = Image.fromarray(s_label)
+        mask.save(out_mask_path)
 
-        #  print("writing {}".format(out_path))
-        #  np.save(out_path, out)
         class_id = []
         num_labels = 0
         if np.any(s_label == 1):
@@ -217,11 +216,10 @@ def multi_processing_create_image(inputs):
 
 def main(args):
 
-    home = str(Path.cwd())
-    root_dir = home+'/datasets/hc'
-    input_dir = args.dataset
+    root_dir = str(Path.cwd())
+    input_dir = Path(args.dataset)
 
-    output_dir = os.path.join(root_dir, 'jpeg_images/')
+    output_dir = os.path.join(root_dir, 'jpeg_images')
 
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -231,21 +229,31 @@ def main(args):
 
     info = [[output_dir, pat, unpack_hc] for pat in patients]
 
-    #  pool = Pool(processes=14)
-    #  pool.map(multi_processing_create_image, info, chunksize=1)
-    #  pool.close()
-    #  pool.join()
+    cpus = 1
+    if args.cpus is None or args.cpus == 'arg_was_not_given':
+        cpus = 1
+    else:
+        cpus = int(args.cpus)
+
+    pool = Pool(processes=cpus)
+    pool.map(multi_processing_create_image, info, chunksize=1)
+    pool.close()
+    pool.join()
 
 
 def parse_args(args_lst):
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        'dataset', help="Dataset directory location")
-    parser.add_argument(
-        'cpus', help="Number of cpus for multi processing")
+    parser.add_argument('dataset', help="Dataset directory location")
+    parser.add_argument('-c','--cpus', nargs='?', const='arg_was_not_given',
+                        help="Number of cpus for multi processing")
+    parser.add_argument('-wc', '--windowcenter', nargs='?', const=150, help="Window Center value")
+    parser.add_argument('-ww', '--windowwidth', nargs='?', const=700, help="Window Width value")
 
     return parser.parse_args(args_lst)
 
+
+window_center = 150
+window_width = 700
 
 if __name__ == "__main__":
     args = parse_args(sys.argv[1:])
